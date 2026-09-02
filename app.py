@@ -1,22 +1,29 @@
+````python
 import os
 import json
-import gradio as gr
+import streamlit as st
 from groq import Groq
 
 # ============================================
 # 1. API & MODEL SETUP
 # ============================================
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "gsk_yahan_apni_groq_key_bhi_daal_sakti_hain")
+
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+
+if not GROQ_API_KEY:
+    st.error("❌ GROQ_API_KEY is not configured.")
+    st.stop()
 
 client = Groq(api_key=GROQ_API_KEY)
 MODEL = "openai/gpt-oss-120b"
 
-quiz_data = None
 
 # ============================================
 # 2. LEARNFLOW Q&A AGENT
 # ============================================
+
 def ask_learnflow(question):
+
     if not question or not question.strip():
         return "Please enter a question."
 
@@ -43,13 +50,17 @@ Rules:
             ],
             temperature=0.3
         )
+
         return response.choices[0].message.content
+
     except Exception as e:
         return f"❌ Error: {str(e)}"
 
+
 # ============================================
-# 3. QUIZ AGENT LOGIC
+# 3. QUIZ AGENT
 # ============================================
+
 def generate_quiz(
     education_level,
     class_degree,
@@ -59,21 +70,24 @@ def generate_quiz(
     difficulty,
     number_of_questions
 ):
-    global quiz_data
 
     if not education_level:
-        return "❌ Please select an education level.", gr.update(visible=False)
+        return None, "❌ Please select an education level."
+
     if not class_degree or not class_degree.strip():
-        return "❌ Please enter your class or degree.", gr.update(visible=False)
+        return None, "❌ Please enter your class or degree."
+
     if not subject or not subject.strip():
-        return "❌ Please enter a subject.", gr.update(visible=False)
+        return None, "❌ Please enter a subject."
+
     if not topic or not topic.strip():
-        return "❌ Please enter a topic.", gr.update(visible=False)
+        return None, "❌ Please enter a topic."
 
     number_of_questions = int(number_of_questions)
 
     prompt = f"""
 You are an expert educational assessment designer.
+
 Create exactly {number_of_questions} multiple-choice questions.
 
 STUDENT INFORMATION:
@@ -85,170 +99,195 @@ Student Level: {student_level}
 Difficulty: {difficulty}
 
 QUESTION RULES:
+
 1. Create exactly {number_of_questions} questions.
 2. Every question must be directly related to the selected subject and topic.
 3. Every question must have exactly 4 options.
 4. All 4 options must be different.
 5. There must be exactly ONE correct option.
-6. The answer field must contain an integer: 0=A, 1=B, 2=C, 3=D.
+6. The answer field must contain an integer:
+   0=A, 1=B, 2=C, 3=D.
 7. Use ONLY single dollar signs for inline math LaTeX: $x^2$.
 8. Every question MUST have a clear explanation.
 
 Return ONLY valid JSON in exactly this structure:
+
 {{
   "questions": [
     {{
       "question": "question text",
-      "options": ["option A", "option B", "option C", "option D"],
+      "options": [
+        "option A",
+        "option B",
+        "option C",
+        "option D"
+      ],
       "answer": 0,
       "explanation": "clear explanation"
     }}
   ]
 }}
+
 Do not include markdown or ```json.
 """
 
     try:
+
         response = client.chat.completions.create(
             model=MODEL,
             messages=[
                 {
                     "role": "system",
-                    "content": "You are a highly accurate educational quiz generator. Use single-dollar LaTeX for math. Return only valid JSON."
+                    "content": (
+                        "You are a highly accurate educational quiz generator. "
+                        "Use single-dollar LaTeX for math. "
+                        "Return only valid JSON."
+                    )
                 },
-                {"role": "user", "content": prompt}
+                {
+                    "role": "user",
+                    "content": prompt
+                }
             ],
             temperature=0.1
         )
 
         raw_response = response.choices[0].message.content.strip()
+
         if raw_response.startswith("```"):
-            raw_response = raw_response.replace("```json", "").replace("```", "").strip()
+            raw_response = (
+                raw_response
+                .replace("```json", "")
+                .replace("```", "")
+                .strip()
+            )
 
         quiz_data = json.loads(raw_response)
+
         questions = quiz_data.get("questions", [])
 
         if len(questions) != number_of_questions:
-            quiz_data = None
-            return "❌ Incorrect number of questions generated.", gr.update(visible=False)
+            return None, "❌ Incorrect number of questions generated."
 
         for q in questions:
-            if not all(field in q for field in ["question", "options", "answer", "explanation"]):
-                quiz_data = None
-                return "❌ Invalid question structure generated.", gr.update(visible=False)
-            if len(q["options"]) != 4:
-                quiz_data = None
-                return "❌ Every question must contain exactly 4 options.", gr.update(visible=False)
-            if q["answer"] not in [0, 1, 2, 3]:
-                quiz_data = None
-                return "❌ Invalid answer index generated.", gr.update(visible=False)
 
-        quiz_data = {"questions": questions}
-        return "", gr.update(visible=True)
+            if not all(
+                field in q
+                for field in [
+                    "question",
+                    "options",
+                    "answer",
+                    "explanation"
+                ]
+            ):
+                return None, "❌ Invalid question structure generated."
+
+            if len(q["options"]) != 4:
+                return None, "❌ Every question must contain exactly 4 options."
+
+            if q["answer"] not in [0, 1, 2, 3]:
+                return None, "❌ Invalid answer index generated."
+
+        return quiz_data, ""
 
     except Exception as e:
-        quiz_data = None
-        return f"❌ Error: {str(e)}", gr.update(visible=False)
+
+        return None, f"❌ Error: {str(e)}"
 
 
-def start_quiz(
-    education_level,
-    class_degree,
-    subject,
-    topic,
-    student_level,
-    difficulty,
-    number_of_questions
-):
-    result, visibility = generate_quiz(
-        education_level,
-        class_degree,
-        subject,
-        topic,
-        student_level,
-        difficulty,
-        number_of_questions
-    )
+# ============================================
+# 4. QUIZ EVALUATION
+# ============================================
 
-    outputs = []
+def evaluate_quiz(quiz_data, student_answers):
 
-    if quiz_data is None:
-        for i in range(10):
-            outputs.append(gr.update(value="", visible=False))
-            outputs.append(gr.update(value="", visible=False))
-            outputs.append(gr.update(choices=["A", "B", "C", "D"], value=None, visible=False))
-        return tuple(outputs)
-
-    for i in range(10):
-        if i < len(quiz_data["questions"]):
-            q = quiz_data["questions"][i]
-            question_text = f"### Question {i + 1}\n\n{q['question']}"
-            options_text = (
-                f"**A.** {q['options'][0]}\n\n"
-                f"**B.** {q['options'][1]}\n\n"
-                f"**C.** {q['options'][2]}\n\n"
-                f"**D.** {q['options'][3]}"
-            )
-            outputs.append(gr.update(value=question_text, visible=True))
-            outputs.append(gr.update(value=options_text, visible=True))
-            outputs.append(gr.update(choices=["A", "B", "C", "D"], value=None, visible=True))
-        else:
-            outputs.append(gr.update(value="", visible=False))
-            outputs.append(gr.update(value="", visible=False))
-            outputs.append(gr.update(choices=["A", "B", "C", "D"], value=None, visible=False))
-
-    return tuple(outputs)
-
-
-def evaluate_quiz(*answers):
-    global quiz_data
     if quiz_data is None:
         return "❌ Please generate a quiz first."
 
     questions = quiz_data["questions"]
+
     score = 0
     total = len(questions)
+
     feedback = []
 
     for i, question in enumerate(questions):
-        student_answer = answers[i]
+
+        student_answer = student_answers[i]
         correct_answer = question["answer"]
 
         if student_answer is None:
+
             feedback.append(
-                f"### Question {i+1} ❌\n\n"
-                f"**Your answer:** Not attempted\n\n"
-                f"**Correct answer:** {chr(65 + correct_answer)}. {question['options'][correct_answer]}\n\n"
-                f"**Explanation:**\n{question.get('explanation', 'No explanation available.')}"
+                f"""
+### Question {i + 1} ❌
+
+**Your answer:** Not attempted
+
+**Correct answer:** {chr(65 + correct_answer)}. {question["options"][correct_answer]}
+
+**Explanation:**
+
+{question.get("explanation", "No explanation available.")}
+"""
             )
+
         elif student_answer == correct_answer:
+
             score += 1
+
             feedback.append(
-                f"### Question {i+1} ✅\n\n"
-                f"**Your answer:** {chr(65 + student_answer)}. {question['options'][student_answer]}\n\n"
-                f"**Explanation:**\n{question.get('explanation', 'No explanation available.')}"
+                f"""
+### Question {i + 1} ✅
+
+**Your answer:** {chr(65 + student_answer)}. {question["options"][student_answer]}
+
+**Explanation:**
+
+{question.get("explanation", "No explanation available.")}
+"""
             )
+
         else:
+
             feedback.append(
-                f"### Question {i+1} ❌\n\n"
-                f"**Your answer:** {chr(65 + student_answer)}. {question['options'][student_answer]}\n\n"
-                f"**Correct answer:** {chr(65 + correct_answer)}. {question['options'][correct_answer]}\n\n"
-                f"**Explanation:**\n{question.get('explanation', 'No explanation available.')}"
+                f"""
+### Question {i + 1} ❌
+
+**Your answer:** {chr(65 + student_answer)}. {question["options"][student_answer]}
+
+**Correct answer:** {chr(65 + correct_answer)}. {question["options"][correct_answer]}
+
+**Explanation:**
+
+{question.get("explanation", "No explanation available.")}
+"""
             )
 
     percentage = (score / total) * 100
-    result = f"# 📊 Quiz Result\n\n**Score:** {score}/{total}\n\n**Percentage:** {percentage:.0f}%\n\n---\n\n# 🧑‍🏫 Learn From Your Answers\n\n"
+
+    result = f"""
+# 📊 Quiz Result
+
+**Score:** {score}/{total}
+
+**Percentage:** {percentage:.0f}%
+
+---
+
+# 🧑‍🏫 Learn From Your Answers
+
+"""
+
     result += "\n\n".join(feedback)
+
     return result
 
 
-def submit_quiz(*answers):
-    converted_answers = [None if a is None else int(a) for a in answers]
-    return evaluate_quiz(*converted_answers)
+# ============================================
+# 5. STUDY PLANNER
+# ============================================
 
-# ============================================
-# 4. STUDY PLANNER LOGIC
-# ============================================
 def generate_study_plan(
     planner_goal,
     planner_subjects,
@@ -258,19 +297,26 @@ def generate_study_plan(
     planner_difficulty,
     planner_language
 ):
+
     if not planner_goal or not planner_goal.strip():
         return "❌ Please enter your study goal."
+
     if not planner_subjects or not planner_subjects.strip():
         return "❌ Please enter your subjects."
+
     if not planner_topics or not planner_topics.strip():
         return "❌ Please enter your topics."
+
     if not planner_hours:
         return "❌ Please enter study hours per day."
+
     if not planner_days:
         return "❌ Please enter the number of available days."
 
     prompt = f"""
-You are an expert AI study planner. Create a personalized study plan in {planner_language}.
+You are an expert AI study planner.
+
+Create a personalized study plan in {planner_language}.
 
 Study Goal: {planner_goal}
 Subjects: {planner_subjects}
@@ -280,129 +326,366 @@ Days Available: {planner_days}
 Difficulty Level: {planner_difficulty}
 
 RULES:
+
 1. Create a realistic plan for exactly {planner_days} days.
 2. Consider available study time of {planner_hours} hours per day.
-3. Format in Markdown. Include overview, day-by-day plan with tasks/breaks, and study tips.
-4. Generate ENTIRE plan in {planner_language}.
+3. Format in Markdown.
+4. Include overview.
+5. Include a day-by-day plan.
+6. Include tasks and breaks.
+7. Include useful study tips.
+8. Generate the ENTIRE plan in {planner_language}.
 """
 
     try:
+
         response = client.chat.completions.create(
             model=MODEL,
             messages=[
-                {"role": "system", "content": "You are a helpful and realistic AI study planner."},
-                {"role": "user", "content": prompt}
+                {
+                    "role": "system",
+                    "content": "You are a helpful and realistic AI study planner."
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
             ],
             temperature=0.3
         )
+
         return response.choices[0].message.content.strip()
+
     except Exception as e:
+
         return f"❌ Error: {str(e)}"
 
+
 # ============================================
-# 5. GRADIO DASHBOARD
+# 6. STREAMLIT PAGE SETUP
 # ============================================
-with gr.Blocks(title="LearnFlow AI") as app:
 
-    # ------------------ TAB 1: LEARNFLOW Q&A ------------------
-    with gr.Tab("💡 LearnFlow Companion"):
-        gr.Markdown("""
-# 🧠 LearnFlow AI
-### Your Personal AI Learning Companion
-**Plan → Learn → Practice → Evaluate → Adapt**
-""")
-        question_input = gr.Textbox(
-            label="What do you want to learn?",
-            placeholder="For example: Explain recursion in very simple language.",
-            lines=4
+st.set_page_config(
+    page_title="LearnFlow AI",
+    page_icon="🧠",
+    layout="wide"
+)
+
+st.title("🧠 LearnFlow AI")
+st.subheader("Your Personal AI Learning Companion")
+
+st.markdown(
+    "**Plan → Learn → Practice → Evaluate → Adapt**"
+)
+
+
+# ============================================
+# 7. TABS
+# ============================================
+
+tab1, tab2, tab3 = st.tabs(
+    [
+        "💡 LearnFlow Companion",
+        "📝 AI Quiz Agent",
+        "📅 AI Study Planner"
+    ]
+)
+
+
+# ============================================
+# TAB 1 — Q&A
+# ============================================
+
+with tab1:
+
+    st.header("💡 LearnFlow Companion")
+
+    question = st.text_area(
+        "What do you want to learn?",
+        placeholder=(
+            "For example: Explain recursion "
+            "in very simple language."
+        ),
+        height=150
+    )
+
+    if st.button(
+        "🤖 Ask LearnFlow AI",
+        key="ask_button"
+    ):
+
+        with st.spinner("LearnFlow AI is thinking..."):
+
+            answer = ask_learnflow(question)
+
+        st.markdown("### 🧑‍🏫 AI Answer")
+        st.markdown(answer)
+
+
+# ============================================
+# TAB 2 — QUIZ
+# ============================================
+
+with tab2:
+
+    st.header("📝 AI Quiz Agent")
+
+    st.markdown("### 🎓 Education Information")
+
+    education_level = st.selectbox(
+        "Education Level",
+        [
+            "Primary",
+            "Middle",
+            "Secondary",
+            "Higher Secondary",
+            "Undergraduate",
+            "Graduate",
+            "Doctoral"
+        ],
+        index=4
+    )
+
+    class_degree = st.text_input(
+        "Class / Degree",
+        placeholder="Example: BS Computer Science, Class 10"
+    )
+
+    st.markdown("### 📚 Quiz Information")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+
+        subject = st.text_input(
+            "Subject",
+            placeholder="e.g. Mathematics"
         )
-        ask_button = gr.Button("Ask LearnFlow AI", variant="primary")
-        answer_output = gr.Markdown(label="AI Answer")
 
-        ask_button.click(
-            fn=ask_learnflow,
-            inputs=question_input,
-            outputs=answer_output
+    with col2:
+
+        topic = st.text_input(
+            "Topic",
+            placeholder="e.g. Calculus"
         )
 
-    # ------------------ TAB 2: QUIZ AGENT ------------------
-    with gr.Tab("📝 AI Quiz Agent"):
-        gr.Markdown("### 🎓 Education Information")
-        with gr.Row():
-            education_level = gr.Dropdown(
-                choices=["Primary", "Middle", "Secondary", "Higher Secondary", "Undergraduate", "Graduate", "Doctoral"],
-                label="Education Level",
-                value="Undergraduate"
+    col3, col4, col5 = st.columns(3)
+
+    with col3:
+
+        student_level = st.selectbox(
+            "Student Level",
+            [
+                "Beginner",
+                "Intermediate",
+                "Advanced"
+            ]
+        )
+
+    with col4:
+
+        difficulty = st.selectbox(
+            "Difficulty",
+            [
+                "Easy",
+                "Medium",
+                "Hard"
+            ],
+            index=1
+        )
+
+    with col5:
+
+        number_of_questions = st.slider(
+            "Number of Questions",
+            min_value=1,
+            max_value=10,
+            value=5,
+            step=1
+        )
+
+    if st.button(
+        "🚀 Generate Quiz",
+        key="generate_quiz_button"
+    ):
+
+        with st.spinner("Generating your quiz..."):
+
+            quiz_data, error = generate_quiz(
+                education_level,
+                class_degree,
+                subject,
+                topic,
+                student_level,
+                difficulty,
+                number_of_questions
             )
-            class_degree = gr.Textbox(
-                label="Class / Degree",
-                placeholder="Example: BS Computer Science, Class 10"
+
+        if error:
+
+            st.error(error)
+
+        else:
+
+            st.session_state.quiz_data = quiz_data
+            st.session_state.quiz_submitted = False
+
+            # Reset previous answers
+            st.session_state.quiz_answers = [
+                None for _ in quiz_data["questions"]
+            ]
+
+            st.success("✅ Quiz generated! Attempt the questions below.")
+
+
+    # ----------------------------------------
+    # DISPLAY QUIZ
+    # ----------------------------------------
+
+    if "quiz_data" in st.session_state:
+
+        quiz_data = st.session_state.quiz_data
+
+        st.markdown("---")
+        st.markdown("## 📝 Attempt Your Quiz")
+
+        for i, q in enumerate(quiz_data["questions"]):
+
+            st.markdown(
+                f"### Question {i + 1}"
             )
 
-        gr.Markdown("### 📚 Quiz Information")
-        with gr.Row():
-            subject = gr.Textbox(label="Subject", placeholder="e.g. Mathematics")
-            topic = gr.Textbox(label="Topic", placeholder="e.g. Calculus")
+            st.markdown(
+                q["question"]
+            )
 
-        with gr.Row():
-            student_level = gr.Dropdown(choices=["Beginner", "Intermediate", "Advanced"], label="Student Level", value="Beginner")
-            difficulty = gr.Dropdown(choices=["Easy", "Medium", "Hard"], label="Difficulty", value="Medium")
-            number_of_questions = gr.Slider(minimum=1, maximum=10, value=5, step=1, label="Number of Questions")
+            selected = st.radio(
+                "Select your answer:",
+                ["A", "B", "C", "D"],
+                index=None,
+                key=f"quiz_answer_{i}"
+            )
 
-        start_button = gr.Button("🚀 Generate Quiz", variant="primary")
+            if selected is not None:
 
-        question_displays = []
-        option_displays = []
-        answer_boxes = []
+                st.session_state.quiz_answers[i] = (
+                    ord(selected) - ord("A")
+                )
 
-        for i in range(10):
-            with gr.Group():
-                q_disp = gr.Markdown(value="", visible=False, latex_delimiters=[{"left": "$", "right": "$", "display": False}])
-                o_disp = gr.Markdown(value="", visible=False, latex_delimiters=[{"left": "$", "right": "$", "display": False}])
-                a_box = gr.Radio(choices=["A", "B", "C", "D"], label="Select your answer", type="index", visible=False)
-                question_displays.append(q_disp)
-                option_displays.append(o_disp)
-                answer_boxes.append(a_box)
+        if st.button(
+            "✅ Submit Quiz",
+            key="submit_quiz_button"
+        ):
 
-        submit_button = gr.Button("✅ Submit Quiz", variant="primary")
-        result_display = gr.Markdown(latex_delimiters=[{"left": "$", "right": "$", "display": False}])
+            st.session_state.quiz_submitted = True
 
-        start_button.click(
-            start_quiz,
-            inputs=[education_level, class_degree, subject, topic, student_level, difficulty, number_of_questions],
-            outputs=[item for triple in zip(question_displays, option_displays, answer_boxes) for item in triple]
-        )
+        # ------------------------------------
+        # SHOW RESULT ONLY AFTER SUBMIT
+        # ------------------------------------
 
-        submit_button.click(
-            submit_quiz,
-            inputs=answer_boxes,
-            outputs=result_display
-        )
+        if st.session_state.get(
+            "quiz_submitted",
+            False
+        ):
 
-    # ------------------ TAB 3: STUDY PLANNER ------------------
-    with gr.Tab("📅 AI Study Planner"):
-        gr.Markdown("### Create your personalized study plan")
-        planner_goal = gr.Textbox(label="🎯 Study Goal", placeholder="Example: Prepare for Calculus final exam")
-        planner_subjects = gr.Textbox(label="📚 Subjects", placeholder="Example: Calculus, Programming")
-        planner_topics = gr.Textbox(label="📝 Topics", placeholder="Example: Integration, Arrays")
+            result = evaluate_quiz(
+                quiz_data,
+                st.session_state.quiz_answers
+            )
 
-        with gr.Row():
-            planner_hours = gr.Number(label="⏰ Study Hours Per Day", value=2, minimum=1, maximum=12)
-            planner_days = gr.Number(label="📅 Days Available", value=7, minimum=1, maximum=60)
-            planner_difficulty = gr.Dropdown(choices=["Easy", "Medium", "Hard"], label="📊 Difficulty Level", value="Medium")
-            planner_language = gr.Dropdown(choices=["English", "Urdu", "Roman Urdu"], label="🌐 Preferred Language", value="English")
+            st.markdown("---")
+            st.markdown(result)
 
-        generate_plan_button = gr.Button("🤖 Generate Study Plan", variant="primary")
-        planner_output = gr.Markdown()
-
-        generate_plan_button.click(
-            generate_study_plan,
-            inputs=[planner_goal, planner_subjects, planner_topics, planner_hours, planner_days, planner_difficulty, planner_language],
-            outputs=planner_output
-        )
 
 # ============================================
-# 6. LAUNCH
+# TAB 3 — STUDY PLANNER
 # ============================================
-if __name__ == "__main__":
-    app.launch()
+
+with tab3:
+
+    st.header("📅 AI Study Planner")
+
+    st.markdown(
+        "### Create your personalized study plan"
+    )
+
+    planner_goal = st.text_input(
+        "🎯 Study Goal",
+        placeholder="Example: Prepare for Calculus final exam"
+    )
+
+    planner_subjects = st.text_input(
+        "📚 Subjects",
+        placeholder="Example: Calculus, Programming"
+    )
+
+    planner_topics = st.text_input(
+        "📝 Topics",
+        placeholder="Example: Integration, Arrays"
+    )
+
+    col1, col2, col3, col4 = st.columns(4)
+
+    with col1:
+
+        planner_hours = st.number_input(
+            "⏰ Study Hours Per Day",
+            min_value=1,
+            max_value=12,
+            value=2
+        )
+
+    with col2:
+
+        planner_days = st.number_input(
+            "📅 Days Available",
+            min_value=1,
+            max_value=60,
+            value=7
+        )
+
+    with col3:
+
+        planner_difficulty = st.selectbox(
+            "📊 Difficulty Level",
+            [
+                "Easy",
+                "Medium",
+                "Hard"
+            ]
+        )
+
+    with col4:
+
+        planner_language = st.selectbox(
+            "🌐 Preferred Language",
+            [
+                "English",
+                "Urdu",
+                "Roman Urdu"
+            ]
+        )
+
+    if st.button(
+        "🤖 Generate Study Plan",
+        key="generate_plan_button"
+    ):
+
+        with st.spinner(
+            "Creating your personalized study plan..."
+        ):
+
+            plan = generate_study_plan(
+                planner_goal,
+                planner_subjects,
+                planner_topics,
+                planner_hours,
+                planner_days,
+                planner_difficulty,
+                planner_language
+            )
+
+        st.markdown("---")
+        st.markdown("## 📅 Your Study Plan")
+        st.markdown(plan)
+````
