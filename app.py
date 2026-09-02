@@ -1,6 +1,8 @@
 import os
 import json
 import sqlite3
+import hashlib
+import secrets
 from datetime import datetime
 from urllib.parse import urlparse
 
@@ -199,12 +201,52 @@ def get_connection():
     return sqlite3.connect(DB_NAME)
 
 
+def ensure_column(cursor, table_name, column_name, column_type):
+
+    cursor.execute(
+        f"PRAGMA table_info({table_name})"
+    )
+
+    columns = [
+        row[1]
+        for row in cursor.fetchall()
+    ]
+
+    if column_name not in columns:
+
+        cursor.execute(
+            f"""
+            ALTER TABLE {table_name}
+            ADD COLUMN {column_name} {column_type}
+            """
+        )
+
+
 def init_database():
 
     conn = get_connection()
     cursor = conn.cursor()
 
-    # Chat memory
+    # -----------------------------------------------------
+    # USERS
+    # -----------------------------------------------------
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            email TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            created_at TEXT
+        )
+        """
+    )
+
+    # -----------------------------------------------------
+    # CHAT MEMORY
+    # -----------------------------------------------------
+
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS chat_history (
@@ -217,7 +259,10 @@ def init_database():
         """
     )
 
-    # Quiz history
+    # -----------------------------------------------------
+    # QUIZ HISTORY
+    # -----------------------------------------------------
+
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS quiz_history (
@@ -235,7 +280,10 @@ def init_database():
         """
     )
 
-    # Study plans
+    # -----------------------------------------------------
+    # STUDY PLANS
+    # -----------------------------------------------------
+
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS study_plans (
@@ -250,6 +298,34 @@ def init_database():
         """
     )
 
+    # -----------------------------------------------------
+    # MIGRATION FOR OLD DATABASE
+    # -----------------------------------------------------
+
+    # Existing databases will receive user_id columns.
+    # Old records remain NULL and are NOT shown to new users.
+
+    ensure_column(
+        cursor,
+        "chat_history",
+        "user_id",
+        "INTEGER"
+    )
+
+    ensure_column(
+        cursor,
+        "quiz_history",
+        "user_id",
+        "INTEGER"
+    )
+
+    ensure_column(
+        cursor,
+        "study_plans",
+        "user_id",
+        "INTEGER"
+    )
+
     conn.commit()
     conn.close()
 
@@ -258,24 +334,432 @@ init_database()
 
 
 # =========================================================
-# 5. STUDENT MEMORY
+# 5. PASSWORD / AUTHENTICATION FUNCTIONS
 # =========================================================
 
-if "student_name" not in st.session_state:
-    st.session_state.student_name = "Student"
+def hash_password(password):
 
+    salt = secrets.token_bytes(16)
+
+    pwd_hash = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt,
+        200_000
+    )
+
+    return (
+        salt.hex()
+        + ":"
+        + pwd_hash.hex()
+    )
+
+
+def verify_password(password, stored_hash):
+
+    try:
+
+        salt_hex, hash_hex = stored_hash.split(":")
+
+        salt = bytes.fromhex(
+            salt_hex
+        )
+
+        pwd_hash = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            salt,
+            200_000
+        )
+
+        return secrets.compare_digest(
+            pwd_hash.hex(),
+            hash_hex
+        )
+
+    except Exception:
+
+        return False
+
+
+def create_user(name, email, password):
+
+    name = name.strip()
+    email = email.strip().lower()
+
+    if not name:
+
+        return False, "❌ Please enter your name."
+
+    if not email:
+
+        return False, "❌ Please enter your email."
+
+    if not password:
+
+        return False, "❌ Please enter a password."
+
+    if len(password) < 8:
+
+        return False, (
+            "❌ Password must be at least 8 characters."
+        )
+
+    password_hash = hash_password(
+        password
+    )
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    try:
+
+        cursor.execute(
+            """
+            INSERT INTO users
+            (name, email, password_hash, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                name,
+                email,
+                password_hash,
+                datetime.now().isoformat()
+            )
+        )
+
+        conn.commit()
+
+        user_id = cursor.lastrowid
+
+        return (
+            True,
+            {
+                "id": user_id,
+                "name": name,
+                "email": email
+            }
+        )
+
+    except sqlite3.IntegrityError:
+
+        return (
+            False,
+            "❌ An account with this email already exists."
+        )
+
+    finally:
+
+        conn.close()
+
+
+def authenticate_user(email, password):
+
+    email = email.strip().lower()
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT id, name, email, password_hash
+        FROM users
+        WHERE email = ?
+        """,
+        (email,)
+    )
+
+    user = cursor.fetchone()
+
+    conn.close()
+
+    if not user:
+
+        return None
+
+    user_id = user[0]
+    name = user[1]
+    user_email = user[2]
+    password_hash = user[3]
+
+    if verify_password(
+        password,
+        password_hash
+    ):
+
+        return (
+            user_id,
+            name,
+            user_email
+        )
+
+    return None
+
+
+# =========================================================
+# 6. SESSION STATE
+# =========================================================
+
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+
+if "user_id" not in st.session_state:
+    st.session_state.user_id = None
+
+if "student_name" not in st.session_state:
+    st.session_state.student_name = ""
+
+if "student_email" not in st.session_state:
+    st.session_state.student_email = ""
+
+if "quiz_data" not in st.session_state:
+    st.session_state.quiz_data = None
+
+if "quiz_submitted" not in st.session_state:
+    st.session_state.quiz_submitted = False
+
+if "quiz_answers" not in st.session_state:
+    st.session_state.quiz_answers = []
+
+if "quiz_saved" not in st.session_state:
+    st.session_state.quiz_saved = False
+
+if "quiz_subject" not in st.session_state:
+    st.session_state.quiz_subject = ""
+
+if "quiz_topic" not in st.session_state:
+    st.session_state.quiz_topic = ""
+
+if "quiz_difficulty" not in st.session_state:
+    st.session_state.quiz_difficulty = ""
+
+
+# =========================================================
+# 7. LOGIN / CREATE ACCOUNT
+# =========================================================
+
+if not st.session_state.authenticated:
+
+    st.markdown(
+        """
+        <div class="hero">
+
+        <h1>🧠 LearnFlow AI</h1>
+
+        <p style="font-size:1.2rem;">
+        Your Personal AI Learning Companion
+        </p>
+
+        <p>
+        🔐 Create an account to keep your learning memory private.
+        </p>
+
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    login_tab, signup_tab = st.tabs(
+        [
+            "🔐 Login",
+            "📝 Create Account"
+        ]
+    )
+
+    # -----------------------------------------------------
+    # LOGIN
+    # -----------------------------------------------------
+
+    with login_tab:
+
+        st.subheader("Welcome Back 👋")
+
+        login_email = st.text_input(
+            "Email",
+            key="login_email",
+            placeholder="Enter your email"
+        )
+
+        login_password = st.text_input(
+            "Password",
+            type="password",
+            key="login_password",
+            placeholder="Enter your password"
+        )
+
+        if st.button(
+            "🔐 Login",
+            key="login_button",
+            use_container_width=True
+        ):
+
+            if not login_email.strip():
+
+                st.error(
+                    "❌ Please enter your email."
+                )
+
+            elif not login_password:
+
+                st.error(
+                    "❌ Please enter your password."
+                )
+
+            else:
+
+                user = authenticate_user(
+                    login_email,
+                    login_password
+                )
+
+                if user:
+
+                    st.session_state.authenticated = True
+                    st.session_state.user_id = user[0]
+                    st.session_state.student_name = user[1]
+                    st.session_state.student_email = user[2]
+
+                    st.session_state.quiz_data = None
+                    st.session_state.quiz_submitted = False
+                    st.session_state.quiz_answers = []
+                    st.session_state.quiz_saved = False
+
+                    st.session_state.quiz_subject = ""
+                    st.session_state.quiz_topic = ""
+                    st.session_state.quiz_difficulty = ""
+
+                    st.success(
+                        f"Welcome back, {user[1]}! 🎉"
+                    )
+
+                    st.rerun()
+
+                else:
+
+                    st.error(
+                        "❌ Invalid email or password."
+                    )
+
+    # -----------------------------------------------------
+    # CREATE ACCOUNT
+    # -----------------------------------------------------
+
+    with signup_tab:
+
+        st.subheader("Create Your LearnFlow Account 🚀")
+
+        signup_name = st.text_input(
+            "Your Name",
+            key="signup_name",
+            placeholder="Enter your name"
+        )
+
+        signup_email = st.text_input(
+            "Email",
+            key="signup_email",
+            placeholder="Enter your email"
+        )
+
+        signup_password = st.text_input(
+            "Password",
+            type="password",
+            key="signup_password",
+            placeholder="At least 8 characters"
+        )
+
+        signup_confirm = st.text_input(
+            "Confirm Password",
+            type="password",
+            key="signup_confirm",
+            placeholder="Enter password again"
+        )
+
+        if st.button(
+            "🚀 Create Account",
+            key="signup_button",
+            use_container_width=True
+        ):
+
+            if signup_password != signup_confirm:
+
+                st.error(
+                    "❌ Passwords do not match."
+                )
+
+            else:
+
+                success, result = create_user(
+                    signup_name,
+                    signup_email,
+                    signup_password
+                )
+
+                if success:
+
+                    st.session_state.authenticated = True
+                    st.session_state.user_id = result["id"]
+                    st.session_state.student_name = result["name"]
+                    st.session_state.student_email = result["email"]
+
+                    st.session_state.quiz_data = None
+                    st.session_state.quiz_submitted = False
+                    st.session_state.quiz_answers = []
+                    st.session_state.quiz_saved = False
+
+                    st.session_state.quiz_subject = ""
+                    st.session_state.quiz_topic = ""
+                    st.session_state.quiz_difficulty = ""
+
+                    st.success(
+                        "🎉 Account created successfully!"
+                    )
+
+                    st.rerun()
+
+                else:
+
+                    st.error(result)
+
+    st.stop()
+
+
+# =========================================================
+# 8. STUDENT SIDEBAR
+# =========================================================
 
 with st.sidebar:
 
     st.markdown("## 👤 Student Profile")
 
-    student_name = st.text_input(
-        "Your Name",
-        value=st.session_state.student_name
+    st.markdown(
+        f"**{st.session_state.student_name}**"
     )
 
-    if student_name.strip():
-        st.session_state.student_name = student_name.strip()
+    st.caption(
+        st.session_state.student_email
+    )
+
+    if st.button(
+        "🚪 Logout",
+        key="logout_button",
+        use_container_width=True
+    ):
+
+        st.session_state.authenticated = False
+        st.session_state.user_id = None
+        st.session_state.student_name = ""
+        st.session_state.student_email = ""
+
+        st.session_state.quiz_data = None
+        st.session_state.quiz_submitted = False
+        st.session_state.quiz_answers = []
+        st.session_state.quiz_saved = False
+
+        st.session_state.quiz_subject = ""
+        st.session_state.quiz_topic = ""
+        st.session_state.quiz_difficulty = ""
+
+        st.rerun()
 
     st.markdown("---")
 
@@ -295,10 +779,15 @@ with st.sidebar:
 
 
 # =========================================================
-# 6. MEMORY FUNCTIONS
+# 9. MEMORY FUNCTIONS
 # =========================================================
 
-def save_chat(student, question, answer):
+def save_chat(
+    user_id,
+    student,
+    question,
+    answer
+):
 
     conn = get_connection()
     cursor = conn.cursor()
@@ -306,10 +795,17 @@ def save_chat(student, question, answer):
     cursor.execute(
         """
         INSERT INTO chat_history
-        (student, question, answer, created_at)
-        VALUES (?, ?, ?, ?)
+        (
+            user_id,
+            student,
+            question,
+            answer,
+            created_at
+        )
+        VALUES (?, ?, ?, ?, ?)
         """,
         (
+            user_id,
             student,
             question,
             answer,
@@ -321,7 +817,10 @@ def save_chat(student, question, answer):
     conn.close()
 
 
-def get_chat_history(student, limit=20):
+def get_chat_history(
+    user_id,
+    limit=20
+):
 
     conn = get_connection()
     cursor = conn.cursor()
@@ -330,11 +829,14 @@ def get_chat_history(student, limit=20):
         """
         SELECT question, answer, created_at
         FROM chat_history
-        WHERE student = ?
+        WHERE user_id = ?
         ORDER BY id DESC
         LIMIT ?
         """,
-        (student, limit)
+        (
+            user_id,
+            limit
+        )
     )
 
     rows = cursor.fetchall()
@@ -345,6 +847,7 @@ def get_chat_history(student, limit=20):
 
 
 def save_quiz_result(
+    user_id,
     student,
     subject,
     topic,
@@ -354,7 +857,11 @@ def save_quiz_result(
     wrong_topics
 ):
 
-    percentage = (score / total) * 100 if total else 0
+    percentage = (
+        (score / total) * 100
+        if total
+        else 0
+    )
 
     conn = get_connection()
     cursor = conn.cursor()
@@ -363,6 +870,7 @@ def save_quiz_result(
         """
         INSERT INTO quiz_history
         (
+            user_id,
             student,
             subject,
             topic,
@@ -373,9 +881,10 @@ def save_quiz_result(
             wrong_topics,
             created_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
+            user_id,
             student,
             subject,
             topic,
@@ -392,7 +901,7 @@ def save_quiz_result(
     conn.close()
 
 
-def get_quiz_history(student):
+def get_quiz_history(user_id):
 
     conn = get_connection()
     cursor = conn.cursor()
@@ -409,10 +918,10 @@ def get_quiz_history(student):
             wrong_topics,
             created_at
         FROM quiz_history
-        WHERE student = ?
+        WHERE user_id = ?
         ORDER BY id DESC
         """,
-        (student,)
+        (user_id,)
     )
 
     rows = cursor.fetchall()
@@ -423,6 +932,7 @@ def get_quiz_history(student):
 
 
 def save_study_plan(
+    user_id,
     student,
     goal,
     subjects,
@@ -437,6 +947,7 @@ def save_study_plan(
         """
         INSERT INTO study_plans
         (
+            user_id,
             student,
             goal,
             subjects,
@@ -444,9 +955,10 @@ def save_study_plan(
             plan,
             created_at
         )
-        VALUES (?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
         (
+            user_id,
             student,
             goal,
             subjects,
@@ -461,28 +973,35 @@ def save_study_plan(
 
 
 # =========================================================
-# 7. WEB SEARCH / SOURCE VERIFICATION
+# 10. WEB SEARCH / SOURCE VERIFICATION
 # =========================================================
 
 TRUSTED_DOMAIN_KEYWORDS = [
+
+    # Official / academic / documentation
     ".gov",
     ".edu",
-    "docs.",
-    "developer.",
-    "learn.microsoft.com",
-    "microsoft.com",
+    ".ac.uk",
+
     "ibm.com",
     "oracle.com",
+    "microsoft.com",
+    "learn.microsoft.com",
+    "postgresql.org",
     "python.org",
     "docs.python.org",
     "developer.mozilla.org",
     "w3.org",
+
+    # Reputable educational resources
+    "geeksforgeeks.org",
+    "w3schools.com",
+    "tutorialspoint.com",
+    "javatpoint.com",
     "khanacademy.org",
     "britannica.com",
-    "postgresql.org",
-    "numpy.org",
-    "pandas.pydata.org",
-    "scikit-learn.org",
+
+    # Universities
     "mit.edu",
     "stanford.edu",
     "harvard.edu",
@@ -494,44 +1013,117 @@ TRUSTED_DOMAIN_KEYWORDS = [
 def get_domain(url):
 
     try:
-        domain = urlparse(url).netloc.lower()
-        return domain.replace("www.", "")
+
+        domain = urlparse(
+            url
+        ).netloc.lower()
+
+        return domain.replace(
+            "www.",
+            ""
+        )
+
     except Exception:
+
         return ""
 
 
 def source_quality_score(result):
 
-    url = result.get("url", "")
-    domain = get_domain(url)
+    url = result.get(
+        "url",
+        ""
+    )
 
-    score = float(result.get("score", 0) or 0)
+    domain = get_domain(
+        url
+    )
 
-    # Strong priority for government sources
-    if domain.endswith(".gov") or ".gov." in domain:
-        score += 0.40
+    relevance = float(
+        result.get(
+            "score",
+            0
+        )
+        or 0
+    )
 
-    # Strong priority for universities
-    if domain.endswith(".edu") or ".edu." in domain:
-        score += 0.40
+    quality_bonus = 0.0
 
-    # UK academic institutions
-    if domain.endswith(".ac.uk"):
-        score += 0.40
+    # Government
+    if (
+        domain.endswith(".gov")
+        or ".gov." in domain
+    ):
 
-    # Known educational / official domains
-    for trusted in TRUSTED_DOMAIN_KEYWORDS:
+        quality_bonus += 0.45
 
-        if trusted in domain:
-            score += 0.25
-            break
+    # Universities
+    elif (
+        domain.endswith(".edu")
+        or ".edu." in domain
+    ):
 
-    return score
+        quality_bonus += 0.45
+
+    # UK academic
+    elif domain.endswith(".ac.uk"):
+
+        quality_bonus += 0.45
+
+    # Official technical sources
+    elif any(
+        trusted in domain
+        for trusted in [
+            "ibm.com",
+            "oracle.com",
+            "microsoft.com",
+            "learn.microsoft.com",
+            "postgresql.org",
+            "python.org",
+            "docs.python.org",
+            "developer.mozilla.org",
+            "w3.org"
+        ]
+    ):
+
+        quality_bonus += 0.35
+
+    # Reputable educational sources
+    elif any(
+        trusted in domain
+        for trusted in [
+            "geeksforgeeks.org",
+            "w3schools.com",
+            "tutorialspoint.com",
+            "javatpoint.com",
+            "khanacademy.org",
+            "britannica.com"
+        ]
+    ):
+
+        quality_bonus += 0.25
+
+    # Named universities
+    elif any(
+        trusted in domain
+        for trusted in [
+            "mit.edu",
+            "stanford.edu",
+            "harvard.edu",
+            "ox.ac.uk",
+            "cam.ac.uk"
+        ]
+    ):
+
+        quality_bonus += 0.45
+
+    return relevance + quality_bonus
 
 
 def search_reliable_sources(question):
 
     if not tavily_client:
+
         return [], (
             "Web search is not configured. "
             "Please configure TAVILY_API_KEY."
@@ -543,72 +1135,196 @@ def search_reliable_sources(question):
             query=question,
             search_depth="advanced",
             topic="general",
-            max_results=8,
+            max_results=10,
             include_answer=False
         )
 
-        results = response.get("results", [])
+        results = response.get(
+            "results",
+            []
+        )
 
-        if not results:
-            return [], "No search results were found."
-
-        # Add our own reliability score
         processed_results = []
 
         for result in results:
 
-            title = result.get("title", "").strip()
-            url = result.get("url", "").strip()
-            content = result.get("content", "").strip()
+            title = result.get(
+                "title",
+                ""
+            ).strip()
 
-            if not title or not url or not content:
+            url = result.get(
+                "url",
+                ""
+            ).strip()
+
+            content = result.get(
+                "content",
+                ""
+            ).strip()
+
+            if (
+                not title
+                or not url
+                or not content
+            ):
+
                 continue
 
-            quality = source_quality_score(result)
+            domain = get_domain(
+                url
+            )
+
+            quality = source_quality_score(
+                result
+            )
+
+            is_trusted = any(
+                trusted in domain
+                for trusted in TRUSTED_DOMAIN_KEYWORDS
+            )
 
             processed_results.append(
                 {
                     "title": title,
                     "url": url,
                     "content": content,
-                    "score": quality
+                    "score": quality,
+                    "trusted": is_trusted
                 }
             )
+
+        reliable_results = [
+            result
+            for result in processed_results
+            if result["trusted"]
+            and result["score"] >= 0.35
+        ]
+
+        reliable_results.sort(
+            key=lambda x: x["score"],
+            reverse=True
+        )
+
+        if reliable_results:
+
+            return (
+                reliable_results[:5],
+                ""
+            )
+
+        # -------------------------------------------------
+        # SECOND SEARCH WITH IMPROVED QUERY
+        # -------------------------------------------------
+
+        improved_query = (
+            f"{question} "
+            "definition explanation educational"
+        )
+
+        response = tavily_client.search(
+            query=improved_query,
+            search_depth="advanced",
+            topic="general",
+            max_results=10,
+            include_answer=False
+        )
+
+        results = response.get(
+            "results",
+            []
+        )
+
+        processed_results = []
+
+        for result in results:
+
+            title = result.get(
+                "title",
+                ""
+            ).strip()
+
+            url = result.get(
+                "url",
+                ""
+            ).strip()
+
+            content = result.get(
+                "content",
+                ""
+            ).strip()
+
+            if (
+                not title
+                or not url
+                or not content
+            ):
+
+                continue
+
+            domain = get_domain(
+                url
+            )
+
+            quality = source_quality_score(
+                result
+            )
+
+            is_trusted = any(
+                trusted in domain
+                for trusted in TRUSTED_DOMAIN_KEYWORDS
+            )
+
+            if (
+                is_trusted
+                and quality >= 0.30
+            ):
+
+                processed_results.append(
+                    {
+                        "title": title,
+                        "url": url,
+                        "content": content,
+                        "score": quality,
+                        "trusted": True
+                    }
+                )
 
         processed_results.sort(
             key=lambda x: x["score"],
             reverse=True
         )
 
-        # Prefer sources with reasonable relevance
-        reliable_results = [
-            result
-            for result in processed_results
-            if result["score"] >= 0.50
-        ]
+        if processed_results:
 
-        # If strong trusted sources exist, use them
-        if reliable_results:
+            return (
+                processed_results[:5],
+                ""
+            )
 
-            return reliable_results[:5], ""
-
-        # No sufficiently reliable source
         return [], (
-            "No sufficiently reliable source was found."
+            "No sufficiently reliable source "
+            "was found."
         )
 
     except Exception as e:
 
-        return [], f"Web search error: {str(e)}"
+        return [], (
+            f"Web search error: {str(e)}"
+        )
 
 
 # =========================================================
-# 8. SOURCE-GROUNDED LEARNFLOW Q&A AGENT
+# 11. SOURCE-GROUNDED LEARNFLOW Q&A AGENT
 # =========================================================
 
 def ask_learnflow(question):
 
-    if not question or not question.strip():
+    if (
+        not question
+        or not question.strip()
+    ):
+
         return (
             "Please enter a question.",
             []
@@ -635,7 +1351,10 @@ def ask_learnflow(question):
 
     source_context_parts = []
 
-    for i, source in enumerate(sources, start=1):
+    for i, source in enumerate(
+        sources,
+        start=1
+    ):
 
         source_context_parts.append(
             f"""
@@ -667,8 +1386,6 @@ Your job is to explain educational information clearly,
 accurately, and in student-friendly language.
 
 The user question has been searched on the web.
-
-You MUST follow these rules:
 
 SOURCE RELIABILITY RULES:
 
@@ -725,17 +1442,29 @@ RETRIEVED SOURCES:
 
 {source_context}
 
-Now answer the student's question using ONLY information
-supported by the retrieved sources.
+Now answer the student's question using the retrieved
+sources as the primary evidence.
+
+The answer should be directly supported by the retrieved
+sources. You may explain the information in simpler words,
+but do not introduce unsupported facts.
+
+If the retrieved sources clearly explain the concept,
+answer the question normally with inline citations.
+
+Only respond with:
+
+"I couldn't verify this from a reliable source."
+
+when the retrieved sources genuinely do not contain enough
+information to answer the student's question.
 
 Remember:
 - Use inline citations like [1] and [2].
 - Do not invent citations.
 - Do not invent URLs.
-- If the sources do not provide enough reliable information,
-  respond exactly:
-
-"I couldn't verify this from a reliable source."
+- Do not claim information came from a source unless that
+  source actually supports it.
 """
 
     try:
@@ -757,17 +1486,17 @@ Remember:
 
         answer = response.choices[0].message.content.strip()
 
-        # -------------------------------------------------
-        # EXTRA SAFETY CHECK
-        # -------------------------------------------------
-
         if not answer:
+
             return (
                 "⚠️ I couldn't verify this from a reliable source.",
                 []
             )
 
-        return answer, sources
+        return (
+            answer,
+            sources
+        )
 
     except Exception as e:
 
@@ -778,7 +1507,7 @@ Remember:
 
 
 # =========================================================
-# 9. QUIZ GENERATOR
+# 12. QUIZ GENERATOR
 # =========================================================
 
 def generate_quiz(
@@ -922,13 +1651,20 @@ Do not include ```json.
                 .strip()
             )
 
-        quiz_data = json.loads(raw_response)
+        quiz_data = json.loads(
+            raw_response
+        )
 
-        questions = quiz_data.get("questions", [])
+        questions = quiz_data.get(
+            "questions",
+            []
+        )
 
         if len(questions) != number_of_questions:
 
-            return None, "❌ Incorrect number of questions generated."
+            return None, (
+                "❌ Incorrect number of questions generated."
+            )
 
         for q in questions:
 
@@ -940,37 +1676,64 @@ Do not include ```json.
                 "concept"
             ]
 
-            if not all(field in q for field in required_fields):
+            if not all(
+                field in q
+                for field in required_fields
+            ):
 
-                return None, "❌ Invalid question structure."
+                return None, (
+                    "❌ Invalid question structure."
+                )
 
             if len(q["options"]) != 4:
 
-                return None, "❌ Every question needs 4 options."
+                return None, (
+                    "❌ Every question needs 4 options."
+                )
 
-            if q["answer"] not in [0, 1, 2, 3]:
+            if q["answer"] not in [
+                0,
+                1,
+                2,
+                3
+            ]:
 
-                return None, "❌ Invalid answer index."
+                return None, (
+                    "❌ Invalid answer index."
+                )
 
             if (
-                not isinstance(q["concept"], str)
+                not isinstance(
+                    q["concept"],
+                    str
+                )
                 or not q["concept"].strip()
             ):
 
-                return None, "❌ Invalid concept field."
+                return None, (
+                    "❌ Invalid concept field."
+                )
 
-        return quiz_data, ""
+        return (
+            quiz_data,
+            ""
+        )
 
     except Exception as e:
 
-        return None, f"❌ Error: {str(e)}"
+        return None, (
+            f"❌ Error: {str(e)}"
+        )
 
 
 # =========================================================
-# 10. QUIZ EVALUATION
+# 13. QUIZ EVALUATION
 # =========================================================
 
-def evaluate_quiz(quiz_data, student_answers):
+def evaluate_quiz(
+    quiz_data,
+    student_answers
+):
 
     questions = quiz_data["questions"]
 
@@ -980,7 +1743,9 @@ def evaluate_quiz(quiz_data, student_answers):
     feedback = []
     wrong_topics = []
 
-    for i, question in enumerate(questions):
+    for i, question in enumerate(
+        questions
+    ):
 
         student_answer = student_answers[i]
 
@@ -1010,7 +1775,9 @@ def evaluate_quiz(quiz_data, student_answers):
 
         elif student_answer is None:
 
-            wrong_topics.append(concept)
+            wrong_topics.append(
+                concept
+            )
 
             feedback.append(
                 f"""
@@ -1029,7 +1796,9 @@ def evaluate_quiz(quiz_data, student_answers):
 
         else:
 
-            wrong_topics.append(concept)
+            wrong_topics.append(
+                concept
+            )
 
             feedback.append(
                 f"""
@@ -1048,7 +1817,9 @@ def evaluate_quiz(quiz_data, student_answers):
             )
 
     wrong_topics = list(
-        dict.fromkeys(wrong_topics)
+        dict.fromkeys(
+            wrong_topics
+        )
     )
 
     percentage = (
@@ -1067,12 +1838,14 @@ def evaluate_quiz(quiz_data, student_answers):
 
 
 # =========================================================
-# 11. WEAK TOPIC ANALYSIS
+# 14. WEAK TOPIC ANALYSIS
 # =========================================================
 
-def get_weak_topics(student):
+def get_weak_topics(user_id):
 
-    history = get_quiz_history(student)
+    history = get_quiz_history(
+        user_id
+    )
 
     topic_stats = {}
 
@@ -1085,23 +1858,33 @@ def get_weak_topics(student):
         saved_wrong_topics = row[6]
 
         try:
+
             wrong_concepts = json.loads(
                 saved_wrong_topics
             )
-        except (json.JSONDecodeError, TypeError):
+
+        except (
+            json.JSONDecodeError,
+            TypeError
+        ):
+
             wrong_concepts = []
 
         wrong_concepts = [
             concept
             for concept in wrong_concepts
-            if not concept.lower().startswith("question ")
+            if not concept.lower().startswith(
+                "question "
+            )
         ]
 
         if wrong_concepts:
 
             for concept in wrong_concepts:
 
-                key = f"{subject} — {concept}"
+                key = (
+                    f"{subject} — {concept}"
+                )
 
                 if key not in topic_stats:
 
@@ -1136,7 +1919,9 @@ def get_weak_topics(student):
     for topic, data in topic_stats.items():
 
         percentage = (
-            data["score"] / data["total"] * 100
+            data["score"]
+            / data["total"]
+            * 100
             if data["total"]
             else 0
         )
@@ -1159,12 +1944,14 @@ def get_weak_topics(student):
 
 
 # =========================================================
-# 12. PERSONALIZED RECOMMENDATIONS
+# 15. PERSONALIZED RECOMMENDATIONS
 # =========================================================
 
-def generate_recommendations(student):
+def generate_recommendations(user_id):
 
-    weak_topics = get_weak_topics(student)
+    weak_topics = get_weak_topics(
+        user_id
+    )
 
     if not weak_topics:
 
@@ -1201,7 +1988,7 @@ Current performance: {percentage:.0f}%
 
 
 # =========================================================
-# 13. STUDY PLANNER
+# 16. STUDY PLANNER
 # =========================================================
 
 def generate_study_plan(
@@ -1277,7 +2064,7 @@ RULES:
 
 
 # =========================================================
-# 14. HEADER
+# 17. HEADER
 # =========================================================
 
 st.markdown(
@@ -1301,18 +2088,20 @@ st.markdown(
 
 
 # =========================================================
-# 15. DASHBOARD
+# 18. DASHBOARD
 # =========================================================
 
 quiz_history = get_quiz_history(
-    st.session_state.student_name
+    st.session_state.user_id
 )
 
 weak_topics = get_weak_topics(
-    st.session_state.student_name
+    st.session_state.user_id
 )
 
-total_quizzes = len(quiz_history)
+total_quizzes = len(
+    quiz_history
+)
 
 if total_quizzes:
 
@@ -1327,7 +2116,9 @@ if total_quizzes:
     )
 
     overall_percentage = (
-        total_score / total_questions * 100
+        total_score
+        / total_questions
+        * 100
         if total_questions
         else 0
     )
@@ -1382,15 +2173,19 @@ with m3:
 with m4:
 
     if overall_percentage >= 80:
+
         level = "Excellent"
 
     elif overall_percentage >= 60:
+
         level = "Good"
 
     elif overall_percentage > 0:
+
         level = "Needs Practice"
 
     else:
+
         level = "New Learner"
 
     st.markdown(
@@ -1408,7 +2203,7 @@ st.markdown("")
 
 
 # =========================================================
-# 16. TABS
+# 19. TABS
 # =========================================================
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs(
@@ -1481,7 +2276,9 @@ with tab1:
                 "### 🧑‍🏫 AI Answer"
             )
 
-            st.markdown(answer)
+            st.markdown(
+                answer
+            )
 
             # ---------------------------------------------
             # SOURCES
@@ -1533,6 +2330,7 @@ with tab1:
             ):
 
                 save_chat(
+                    st.session_state.user_id,
                     st.session_state.student_name,
                     question,
                     answer
@@ -1679,6 +2477,12 @@ with tab2:
 
             st.session_state.quiz_saved = False
 
+            # Store quiz metadata so it remains tied
+            # to the generated quiz.
+            st.session_state.quiz_subject = subject
+            st.session_state.quiz_topic = topic
+            st.session_state.quiz_difficulty = difficulty
+
             st.success(
                 "✅ Quiz generated! Attempt all questions."
             )
@@ -1688,7 +2492,7 @@ with tab2:
     # DISPLAY QUIZ
     # ---------------------------------------------
 
-    if "quiz_data" in st.session_state:
+    if st.session_state.quiz_data is not None:
 
         quiz_data = st.session_state.quiz_data
 
@@ -1712,7 +2516,12 @@ with tab2:
 
             selected = st.radio(
                 "Select your answer:",
-                ["A", "B", "C", "D"],
+                [
+                    "A",
+                    "B",
+                    "C",
+                    "D"
+                ],
                 index=None,
                 key=f"quiz_answer_{i}"
             )
@@ -1720,7 +2529,8 @@ with tab2:
             if selected is not None:
 
                 st.session_state.quiz_answers[i] = (
-                    ord(selected) - ord("A")
+                    ord(selected)
+                    - ord("A")
                 )
 
 
@@ -1754,10 +2564,11 @@ with tab2:
             ):
 
                 save_quiz_result(
+                    st.session_state.user_id,
                     st.session_state.student_name,
-                    subject,
-                    topic,
-                    difficulty,
+                    st.session_state.quiz_subject,
+                    st.session_state.quiz_topic,
+                    st.session_state.quiz_difficulty,
                     score,
                     total,
                     wrong_topics
@@ -1791,12 +2602,15 @@ with tab2:
             with r3:
 
                 if percentage >= 80:
+
                     status = "Excellent 🎉"
 
                 elif percentage >= 60:
+
                     status = "Good 👍"
 
                 else:
+
                     status = "Needs Practice 📚"
 
                 st.metric(
@@ -1836,12 +2650,14 @@ with tab2:
             )
 
             recommendations = generate_recommendations(
-                st.session_state.student_name
+                st.session_state.user_id
             )
 
             for recommendation in recommendations:
 
-                with st.container(border=True):
+                with st.container(
+                    border=True
+                ):
 
                     st.markdown(
                         recommendation
@@ -1943,11 +2759,14 @@ with tab3:
             "## 📅 Your Study Plan"
         )
 
-        st.markdown(plan)
+        st.markdown(
+            plan
+        )
 
         if not plan.startswith("❌"):
 
             save_study_plan(
+                st.session_state.user_id,
                 st.session_state.student_name,
                 planner_goal,
                 planner_subjects,
@@ -1970,7 +2789,7 @@ with tab4:
     st.header("📈 Student Progress")
 
     history = get_quiz_history(
-        st.session_state.student_name
+        st.session_state.user_id
     )
 
     if not history:
@@ -2024,7 +2843,7 @@ with tab4:
         )
 
         weak_topics = get_weak_topics(
-            st.session_state.student_name
+            st.session_state.user_id
         )
 
         if weak_topics:
@@ -2066,12 +2885,14 @@ with tab4:
         )
 
         recommendations = generate_recommendations(
-            st.session_state.student_name
+            st.session_state.user_id
         )
 
         for recommendation in recommendations:
 
-            with st.container(border=True):
+            with st.container(
+                border=True
+            ):
 
                 st.markdown(
                     recommendation
@@ -2100,7 +2921,7 @@ with tab5:
     )
 
     chats = get_chat_history(
-        st.session_state.student_name
+        st.session_state.user_id
     )
 
     if chats:
@@ -2170,7 +2991,7 @@ with tab5:
     )
 
     weak_topics = get_weak_topics(
-        st.session_state.student_name
+        st.session_state.user_id
     )
 
     if weak_topics:
