@@ -2,9 +2,11 @@ import os
 import json
 import sqlite3
 from datetime import datetime
+from urllib.parse import urlparse
 
 import streamlit as st
 from groq import Groq
+from tavily import TavilyClient
 
 
 # =========================================================
@@ -30,28 +32,45 @@ st.markdown(
         padding-top: 1rem;
     }
 
+    /* ---------- HERO ---------- */
+
     .hero {
-        padding: 2rem;
-        border-radius: 20px;
+        padding: 2.2rem;
+        border-radius: 22px;
         margin-bottom: 1.5rem;
-        background: linear-gradient(
-            135deg,
-            rgba(99,102,241,0.15),
-            rgba(59,130,246,0.10)
-        );
-        border: 1px solid rgba(99,102,241,0.25);
+        background:
+            linear-gradient(
+                135deg,
+                rgba(79,70,229,0.18),
+                rgba(14,165,233,0.12),
+                rgba(16,185,129,0.10)
+            );
+        border: 1px solid rgba(99,102,241,0.28);
+        box-shadow: 0 10px 35px rgba(0,0,0,0.08);
     }
 
     .hero h1 {
         margin-bottom: 0.3rem;
+        font-size: 2.6rem;
     }
 
+    .hero p {
+        margin-top: 0.4rem;
+    }
+
+    /* ---------- METRIC CARDS ---------- */
+
     .metric-card {
-        padding: 1.2rem;
-        border-radius: 16px;
-        border: 1px solid rgba(128,128,128,0.25);
+        padding: 1.25rem;
+        border-radius: 18px;
+        border: 1px solid rgba(99,102,241,0.22);
         text-align: center;
-        background: rgba(128,128,128,0.05);
+        background: linear-gradient(
+            145deg,
+            rgba(99,102,241,0.10),
+            rgba(59,130,246,0.05)
+        );
+        box-shadow: 0 6px 20px rgba(0,0,0,0.06);
     }
 
     .metric-number {
@@ -64,20 +83,59 @@ st.markdown(
         opacity: 0.75;
     }
 
+    /* ---------- WEAK TOPIC ---------- */
+
     .weak-topic {
         padding: 1rem;
-        border-radius: 12px;
-        margin-bottom: 0.6rem;
+        border-radius: 14px;
+        margin-bottom: 0.7rem;
         border-left: 5px solid #ef4444;
         background: rgba(239,68,68,0.08);
     }
 
-    .recommendation {
-        padding: 1rem;
+    /* ---------- SOURCE CARD ---------- */
+
+    .source-card {
+        padding: 0.9rem 1rem;
         border-radius: 12px;
         margin-bottom: 0.6rem;
-        border-left: 5px solid #3b82f6;
-        background: rgba(59,130,246,0.08);
+        border: 1px solid rgba(59,130,246,0.22);
+        background: rgba(59,130,246,0.06);
+    }
+
+    .source-number {
+        font-weight: 700;
+        color: #3b82f6;
+    }
+
+    /* ---------- INFO CARD ---------- */
+
+    .info-card {
+        padding: 1rem;
+        border-radius: 14px;
+        border: 1px solid rgba(16,185,129,0.25);
+        background: rgba(16,185,129,0.07);
+        margin-bottom: 1rem;
+    }
+
+    /* ---------- BUTTONS ---------- */
+
+    .stButton > button {
+        border-radius: 12px;
+        font-weight: 600;
+        min-height: 2.8rem;
+    }
+
+    /* ---------- HEADINGS ---------- */
+
+    h1, h2, h3 {
+        letter-spacing: -0.02em;
+    }
+
+    /* ---------- SIDEBAR ---------- */
+
+    section[data-testid="stSidebar"] {
+        border-right: 1px solid rgba(128,128,128,0.15);
     }
 
     </style>
@@ -93,10 +151,39 @@ st.markdown(
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
 if not GROQ_API_KEY:
+    try:
+        GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
+    except Exception:
+        GROQ_API_KEY = None
+
+if not GROQ_API_KEY:
     st.error("❌ GROQ_API_KEY is not configured.")
     st.stop()
 
+
+TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY")
+
+if not TAVILY_API_KEY:
+    try:
+        TAVILY_API_KEY = st.secrets["TAVILY_API_KEY"]
+    except Exception:
+        TAVILY_API_KEY = None
+
+
+if not TAVILY_API_KEY:
+    st.warning(
+        "⚠️ TAVILY_API_KEY is not configured. "
+        "AI Tutor web search will not be available."
+    )
+
+
 client = Groq(api_key=GROQ_API_KEY)
+
+tavily_client = (
+    TavilyClient(api_key=TAVILY_API_KEY)
+    if TAVILY_API_KEY
+    else None
+)
 
 MODEL = "openai/gpt-oss-120b"
 
@@ -199,6 +286,13 @@ with st.sidebar:
         "to build personalized recommendations."
     )
 
+    st.markdown("---")
+
+    if tavily_client:
+        st.success("🔎 Web Search: Connected")
+    else:
+        st.warning("🔎 Web Search: Not Connected")
+
 
 # =========================================================
 # 6. MEMORY FUNCTIONS
@@ -207,7 +301,6 @@ with st.sidebar:
 def save_chat(student, question, answer):
 
     conn = get_connection()
-
     cursor = conn.cursor()
 
     cursor.execute(
@@ -231,7 +324,6 @@ def save_chat(student, question, answer):
 def get_chat_history(student, limit=20):
 
     conn = get_connection()
-
     cursor = conn.cursor()
 
     cursor.execute(
@@ -265,7 +357,6 @@ def save_quiz_result(
     percentage = (score / total) * 100 if total else 0
 
     conn = get_connection()
-
     cursor = conn.cursor()
 
     cursor.execute(
@@ -304,7 +395,6 @@ def save_quiz_result(
 def get_quiz_history(student):
 
     conn = get_connection()
-
     cursor = conn.cursor()
 
     cursor.execute(
@@ -341,7 +431,6 @@ def save_study_plan(
 ):
 
     conn = get_connection()
-
     cursor = conn.cursor()
 
     cursor.execute(
@@ -372,28 +461,281 @@ def save_study_plan(
 
 
 # =========================================================
-# 7. LEARNFLOW Q&A AGENT
+# 7. WEB SEARCH / SOURCE VERIFICATION
+# =========================================================
+
+TRUSTED_DOMAIN_KEYWORDS = [
+    ".gov",
+    ".edu",
+    "docs.",
+    "developer.",
+    "learn.microsoft.com",
+    "microsoft.com",
+    "ibm.com",
+    "oracle.com",
+    "python.org",
+    "docs.python.org",
+    "developer.mozilla.org",
+    "w3.org",
+    "khanacademy.org",
+    "britannica.com",
+    "postgresql.org",
+    "numpy.org",
+    "pandas.pydata.org",
+    "scikit-learn.org",
+    "mit.edu",
+    "stanford.edu",
+    "harvard.edu",
+    "ox.ac.uk",
+    "cam.ac.uk"
+]
+
+
+def get_domain(url):
+
+    try:
+        domain = urlparse(url).netloc.lower()
+        return domain.replace("www.", "")
+    except Exception:
+        return ""
+
+
+def source_quality_score(result):
+
+    url = result.get("url", "")
+    domain = get_domain(url)
+
+    score = float(result.get("score", 0) or 0)
+
+    # Strong priority for government sources
+    if domain.endswith(".gov") or ".gov." in domain:
+        score += 0.40
+
+    # Strong priority for universities
+    if domain.endswith(".edu") or ".edu." in domain:
+        score += 0.40
+
+    # UK academic institutions
+    if domain.endswith(".ac.uk"):
+        score += 0.40
+
+    # Known educational / official domains
+    for trusted in TRUSTED_DOMAIN_KEYWORDS:
+
+        if trusted in domain:
+            score += 0.25
+            break
+
+    return score
+
+
+def search_reliable_sources(question):
+
+    if not tavily_client:
+        return [], (
+            "Web search is not configured. "
+            "Please configure TAVILY_API_KEY."
+        )
+
+    try:
+
+        response = tavily_client.search(
+            query=question,
+            search_depth="advanced",
+            topic="general",
+            max_results=8,
+            include_answer=False
+        )
+
+        results = response.get("results", [])
+
+        if not results:
+            return [], "No search results were found."
+
+        # Add our own reliability score
+        processed_results = []
+
+        for result in results:
+
+            title = result.get("title", "").strip()
+            url = result.get("url", "").strip()
+            content = result.get("content", "").strip()
+
+            if not title or not url or not content:
+                continue
+
+            quality = source_quality_score(result)
+
+            processed_results.append(
+                {
+                    "title": title,
+                    "url": url,
+                    "content": content,
+                    "score": quality
+                }
+            )
+
+        processed_results.sort(
+            key=lambda x: x["score"],
+            reverse=True
+        )
+
+        # Prefer sources with reasonable relevance
+        reliable_results = [
+            result
+            for result in processed_results
+            if result["score"] >= 0.50
+        ]
+
+        # If strong trusted sources exist, use them
+        if reliable_results:
+
+            return reliable_results[:5], ""
+
+        # No sufficiently reliable source
+        return [], (
+            "No sufficiently reliable source was found."
+        )
+
+    except Exception as e:
+
+        return [], f"Web search error: {str(e)}"
+
+
+# =========================================================
+# 8. SOURCE-GROUNDED LEARNFLOW Q&A AGENT
 # =========================================================
 
 def ask_learnflow(question):
 
     if not question or not question.strip():
-        return "Please enter a question."
+        return (
+            "Please enter a question.",
+            []
+        )
+
+    sources, search_error = search_reliable_sources(
+        question
+    )
+
+    # -----------------------------------------------------
+    # NO RELIABLE SOURCE
+    # -----------------------------------------------------
+
+    if not sources:
+
+        return (
+            "⚠️ I couldn't verify this from a reliable source.",
+            []
+        )
+
+    # -----------------------------------------------------
+    # BUILD SOURCE CONTEXT
+    # -----------------------------------------------------
+
+    source_context_parts = []
+
+    for i, source in enumerate(sources, start=1):
+
+        source_context_parts.append(
+            f"""
+SOURCE {i}
+
+Title:
+{source["title"]}
+
+URL:
+{source["url"]}
+
+Content:
+{source["content"]}
+"""
+        )
+
+    source_context = "\n".join(
+        source_context_parts
+    )
+
+    # -----------------------------------------------------
+    # STRICT SOURCE-GROUNDED SYSTEM PROMPT
+    # -----------------------------------------------------
 
     system_prompt = """
-You are LearnFlow AI, a friendly personal AI learning companion.
+You are LearnFlow AI, a reliable personal AI learning companion.
 
-Your job is to help students learn.
+Your job is to explain educational information clearly,
+accurately, and in student-friendly language.
 
-Rules:
+The user question has been searched on the web.
 
-- Explain concepts in easy language.
-- Adjust explanations according to the student's level.
-- Use examples when useful.
-- Break difficult topics into small steps.
-- Do not invent facts or sources.
-- If you are uncertain, clearly say so.
-- Encourage learning and understanding rather than simply giving answers.
+You MUST follow these rules:
+
+SOURCE RELIABILITY RULES:
+
+1. Use the retrieved sources provided in the context.
+2. Give priority to official documentation, government sources,
+   universities, academic institutions, reputable textbooks,
+   and reputable educational resources.
+3. Do NOT invent sources.
+4. Do NOT invent citations.
+5. Do NOT invent URLs.
+6. Do NOT invent books, papers, authors, statistics, or references.
+7. Do NOT claim that you checked a source that is not provided.
+8. Do NOT use unsupported information as if it came from the sources.
+9. If the retrieved sources do not adequately support the answer,
+   say exactly:
+
+   "I couldn't verify this from a reliable source."
+
+10. Do not fill missing information with guesses.
+11. Do not present uncertain information as a verified fact.
+
+ANSWER RULES:
+
+12. Answer the student's actual question.
+13. Use simple language.
+14. Break difficult concepts into small steps.
+15. Use examples when useful.
+16. Keep the explanation educational rather than overly complicated.
+17. If the sources disagree, explain the disagreement instead
+    of silently choosing one.
+18. For current or changing information, rely on the retrieved
+    sources rather than your internal knowledge.
+
+CITATION RULE:
+
+19. Every important factual claim based on retrieved web information
+    should have an inline citation such as [1], [2], or [1][2].
+20. The citation numbers must correspond exactly to the SOURCE
+    numbers provided in the context.
+21. Never create a citation number for a source that does not exist.
+
+IMPORTANT:
+
+The retrieved source content is the evidence for your answer.
+Do not pretend to have searched anything beyond the provided sources.
+"""
+
+    user_prompt = f"""
+STUDENT QUESTION:
+
+{question}
+
+RETRIEVED SOURCES:
+
+{source_context}
+
+Now answer the student's question using ONLY information
+supported by the retrieved sources.
+
+Remember:
+- Use inline citations like [1] and [2].
+- Do not invent citations.
+- Do not invent URLs.
+- If the sources do not provide enough reliable information,
+  respond exactly:
+
+"I couldn't verify this from a reliable source."
 """
 
     try:
@@ -407,21 +749,36 @@ Rules:
                 },
                 {
                     "role": "user",
-                    "content": question
+                    "content": user_prompt
                 }
             ],
-            temperature=0.3
+            temperature=0.1
         )
 
-        return response.choices[0].message.content
+        answer = response.choices[0].message.content.strip()
+
+        # -------------------------------------------------
+        # EXTRA SAFETY CHECK
+        # -------------------------------------------------
+
+        if not answer:
+            return (
+                "⚠️ I couldn't verify this from a reliable source.",
+                []
+            )
+
+        return answer, sources
 
     except Exception as e:
 
-        return f"❌ Error: {str(e)}"
+        return (
+            f"❌ Error: {str(e)}",
+            []
+        )
 
 
 # =========================================================
-# 8. QUIZ GENERATOR
+# 9. QUIZ GENERATOR
 # =========================================================
 
 def generate_quiz(
@@ -472,6 +829,42 @@ QUESTION RULES:
    0=A, 1=B, 2=C, 3=D.
 7. Use ONLY single dollar signs for inline math LaTeX.
 8. Every question must have a clear explanation.
+9. Prefer standard textbook concepts and established educational knowledge.
+10. Do not invent facts, fake citations, fake sources, or fake references.
+11. Make the difficulty appropriate for the selected Student Level and Difficulty.
+12. If Student Level is Beginner and Difficulty is Easy, avoid unnecessarily
+    advanced or tricky questions.
+
+13. IMPORTANT CONCEPT TRACKING RULE:
+
+For every question, identify the MAIN educational concept or subtopic
+being tested.
+
+The "concept" must be a short, meaningful topic name, NOT a question number.
+
+GOOD examples:
+"Arrays"
+"Loops"
+"Functions"
+"Pointers"
+"Variables"
+"Integration"
+"Derivatives"
+"Normalization"
+
+BAD examples:
+"Question 1"
+"Question 2"
+"Q1"
+"Q2"
+
+If the selected topic is "Arrays", concepts may be things such as:
+"Array Indexing"
+"Array Traversal"
+"Array Declaration"
+
+The concept must accurately describe the knowledge being tested
+by that specific question.
 
 Return ONLY valid JSON:
 
@@ -486,7 +879,8 @@ Return ONLY valid JSON:
                 "option D"
             ],
             "answer": 0,
-            "explanation": "clear explanation"
+            "explanation": "clear explanation",
+            "concept": "actual concept or subtopic"
         }}
     ]
 }}
@@ -504,6 +898,8 @@ Do not include ```json.
                     "role": "system",
                     "content": (
                         "You are a highly accurate educational quiz generator. "
+                        "Use established educational knowledge. "
+                        "Every question must include an accurate concept field. "
                         "Return only valid JSON."
                     )
                 },
@@ -540,7 +936,8 @@ Do not include ```json.
                 "question",
                 "options",
                 "answer",
-                "explanation"
+                "explanation",
+                "concept"
             ]
 
             if not all(field in q for field in required_fields):
@@ -555,6 +952,13 @@ Do not include ```json.
 
                 return None, "❌ Invalid answer index."
 
+            if (
+                not isinstance(q["concept"], str)
+                or not q["concept"].strip()
+            ):
+
+                return None, "❌ Invalid concept field."
+
         return quiz_data, ""
 
     except Exception as e:
@@ -563,7 +967,7 @@ Do not include ```json.
 
 
 # =========================================================
-# 9. QUIZ EVALUATION
+# 10. QUIZ EVALUATION
 # =========================================================
 
 def evaluate_quiz(quiz_data, student_answers):
@@ -581,6 +985,11 @@ def evaluate_quiz(quiz_data, student_answers):
         student_answer = student_answers[i]
 
         correct_answer = question["answer"]
+
+        concept = question.get(
+            "concept",
+            "General Topic"
+        ).strip()
 
         if student_answer == correct_answer:
 
@@ -601,9 +1010,7 @@ def evaluate_quiz(quiz_data, student_answers):
 
         elif student_answer is None:
 
-            wrong_topics.append(
-                f"Question {i + 1}"
-            )
+            wrong_topics.append(concept)
 
             feedback.append(
                 f"""
@@ -622,9 +1029,7 @@ def evaluate_quiz(quiz_data, student_answers):
 
         else:
 
-            wrong_topics.append(
-                f"Question {i + 1}"
-            )
+            wrong_topics.append(concept)
 
             feedback.append(
                 f"""
@@ -642,13 +1047,27 @@ def evaluate_quiz(quiz_data, student_answers):
 """
             )
 
-    percentage = (score / total) * 100 if total else 0
+    wrong_topics = list(
+        dict.fromkeys(wrong_topics)
+    )
 
-    return score, total, percentage, wrong_topics, feedback
+    percentage = (
+        (score / total) * 100
+        if total
+        else 0
+    )
+
+    return (
+        score,
+        total,
+        percentage,
+        wrong_topics,
+        feedback
+    )
 
 
 # =========================================================
-# 10. WEAK TOPIC ANALYSIS
+# 11. WEAK TOPIC ANALYSIS
 # =========================================================
 
 def get_weak_topics(student):
@@ -660,23 +1079,57 @@ def get_weak_topics(student):
     for row in history:
 
         subject = row[0]
-        topic = row[1]
+        selected_topic = row[1]
         score = row[3]
         total = row[4]
+        saved_wrong_topics = row[6]
 
-        key = f"{subject} — {topic}"
+        try:
+            wrong_concepts = json.loads(
+                saved_wrong_topics
+            )
+        except (json.JSONDecodeError, TypeError):
+            wrong_concepts = []
 
-        if key not in topic_stats:
+        wrong_concepts = [
+            concept
+            for concept in wrong_concepts
+            if not concept.lower().startswith("question ")
+        ]
 
-            topic_stats[key] = {
+        if wrong_concepts:
+
+            for concept in wrong_concepts:
+
+                key = f"{subject} — {concept}"
+
+                if key not in topic_stats:
+
+                    topic_stats[key] = {
+                        "score": 0,
+                        "total": 0,
+                        "attempts": 0
+                    }
+
+                topic_stats[key]["score"] += 0
+                topic_stats[key]["total"] += 1
+                topic_stats[key]["attempts"] += 1
+
+        selected_key = (
+            f"{subject} — {selected_topic}"
+        )
+
+        if selected_key not in topic_stats:
+
+            topic_stats[selected_key] = {
                 "score": 0,
                 "total": 0,
                 "attempts": 0
             }
 
-        topic_stats[key]["score"] += score
-        topic_stats[key]["total"] += total
-        topic_stats[key]["attempts"] += 1
+        topic_stats[selected_key]["score"] += score
+        topic_stats[selected_key]["total"] += total
+        topic_stats[selected_key]["attempts"] += 1
 
     weak_topics = []
 
@@ -706,7 +1159,7 @@ def get_weak_topics(student):
 
 
 # =========================================================
-# 11. PERSONALIZED RECOMMENDATIONS
+# 12. PERSONALIZED RECOMMENDATIONS
 # =========================================================
 
 def generate_recommendations(student):
@@ -748,7 +1201,7 @@ Current performance: {percentage:.0f}%
 
 
 # =========================================================
-# 12. STUDY PLANNER
+# 13. STUDY PLANNER
 # =========================================================
 
 def generate_study_plan(
@@ -793,6 +1246,7 @@ RULES:
 6. Include tasks and breaks.
 7. Include useful study tips.
 8. Generate the entire plan in {planner_language}.
+9. Do not invent academic sources or fake references.
 """
 
     try:
@@ -802,7 +1256,10 @@ RULES:
             messages=[
                 {
                     "role": "system",
-                    "content": "You are a helpful AI study planner."
+                    "content": (
+                        "You are a helpful and accurate AI study planner. "
+                        "Do not invent sources, citations, or references."
+                    )
                 },
                 {
                     "role": "user",
@@ -820,7 +1277,7 @@ RULES:
 
 
 # =========================================================
-# 13. HEADER
+# 14. HEADER
 # =========================================================
 
 st.markdown(
@@ -844,7 +1301,7 @@ st.markdown(
 
 
 # =========================================================
-# 14. DASHBOARD
+# 15. DASHBOARD
 # =========================================================
 
 quiz_history = get_quiz_history(
@@ -859,8 +1316,15 @@ total_quizzes = len(quiz_history)
 
 if total_quizzes:
 
-    total_score = sum(row[3] for row in quiz_history)
-    total_questions = sum(row[4] for row in quiz_history)
+    total_score = sum(
+        row[3]
+        for row in quiz_history
+    )
+
+    total_questions = sum(
+        row[4]
+        for row in quiz_history
+    )
 
     overall_percentage = (
         total_score / total_questions * 100
@@ -875,6 +1339,7 @@ else:
 
 m1, m2, m3, m4 = st.columns(4)
 
+
 with m1:
 
     st.markdown(
@@ -886,6 +1351,7 @@ with m1:
         """,
         unsafe_allow_html=True
     )
+
 
 with m2:
 
@@ -899,6 +1365,7 @@ with m2:
         unsafe_allow_html=True
     )
 
+
 with m3:
 
     st.markdown(
@@ -911,14 +1378,18 @@ with m3:
         unsafe_allow_html=True
     )
 
+
 with m4:
 
     if overall_percentage >= 80:
         level = "Excellent"
+
     elif overall_percentage >= 60:
         level = "Good"
+
     elif overall_percentage > 0:
         level = "Needs Practice"
+
     else:
         level = "New Learner"
 
@@ -937,7 +1408,7 @@ st.markdown("")
 
 
 # =========================================================
-# 15. TABS
+# 16. TABS
 # =========================================================
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs(
@@ -959,6 +1430,17 @@ with tab1:
 
     st.header("💡 LearnFlow Companion")
 
+    st.markdown(
+        """
+        <div class="info-card">
+        🔎 <b>Source-Backed Learning</b><br>
+        LearnFlow searches the web for relevant reliable sources
+        before generating an educational explanation.
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
     question = st.text_area(
         "What do you want to learn?",
         placeholder=(
@@ -972,25 +1454,108 @@ with tab1:
         key="ask_button"
     ):
 
-        with st.spinner(
-            "LearnFlow AI is thinking..."
-        ):
+        if not question.strip():
 
-            answer = ask_learnflow(question)
+            st.warning(
+                "Please enter a question."
+            )
 
-        save_chat(
-            st.session_state.student_name,
-            question,
-            answer
-        )
+        elif not tavily_client:
 
-        st.markdown("### 🧑‍🏫 AI Answer")
+            st.error(
+                "❌ Web Search is not configured. "
+                "Please add TAVILY_API_KEY."
+            )
 
-        st.markdown(answer)
+        else:
 
-        st.success(
-            "💾 This conversation has been saved to your learning memory."
-        )
+            with st.spinner(
+                "🔎 Searching reliable sources and preparing your answer..."
+            ):
+
+                answer, sources = ask_learnflow(
+                    question
+                )
+
+            st.markdown(
+                "### 🧑‍🏫 AI Answer"
+            )
+
+            st.markdown(answer)
+
+            # ---------------------------------------------
+            # SOURCES
+            # ---------------------------------------------
+
+            if sources:
+
+                st.markdown("---")
+
+                st.markdown(
+                    "### 📚 Sources Used"
+                )
+
+                for i, source in enumerate(
+                    sources,
+                    start=1
+                ):
+
+                    st.markdown(
+                        f"""
+                        <div class="source-card">
+
+                        <span class="source-number">
+                        [{i}]
+                        </span>
+
+                        <b>{source["title"]}</b>
+
+                        <br><br>
+
+                        🔗
+                        <a href="{source["url"]}"
+                           target="_blank">
+                           {source["url"]}
+                        </a>
+
+                        </div>
+                        """,
+                        unsafe_allow_html=True
+                    )
+
+            # ---------------------------------------------
+            # SAVE CHAT
+            # ---------------------------------------------
+
+            if (
+                not answer.startswith("❌")
+                and not answer.startswith("⚠️")
+            ):
+
+                save_chat(
+                    st.session_state.student_name,
+                    question,
+                    answer
+                )
+
+                st.success(
+                    "💾 This conversation has been saved "
+                    "to your learning memory."
+                )
+
+            elif answer.startswith("⚠️"):
+
+                st.warning(
+                    "This answer was not saved because "
+                    "reliable source verification was not available."
+                )
+
+            else:
+
+                st.error(
+                    "The answer could not be generated, "
+                    "so it was not saved."
+                )
 
 
 # =========================================================
@@ -1001,7 +1566,9 @@ with tab2:
 
     st.header("📝 AI Quiz Agent")
 
-    st.markdown("### 🎓 Education Information")
+    st.markdown(
+        "### 🎓 Education Information"
+    )
 
     education_level = st.selectbox(
         "Education Level",
@@ -1022,7 +1589,9 @@ with tab2:
         placeholder="Example: BS Computer Science"
     )
 
-    st.markdown("### 📚 Quiz Information")
+    st.markdown(
+        "### 📚 Quiz Information"
+    )
 
     col1, col2 = st.columns(2)
 
@@ -1062,7 +1631,7 @@ with tab2:
                 "Medium",
                 "Hard"
             ],
-            index=1
+            index=0
         )
 
     with col5:
@@ -1125,7 +1694,9 @@ with tab2:
 
         st.markdown("---")
 
-        st.markdown("## 📝 Attempt Your Quiz")
+        st.markdown(
+            "## 📝 Attempt Your Quiz"
+        )
 
         for i, q in enumerate(
             quiz_data["questions"]
@@ -1177,7 +1748,6 @@ with tab2:
                 )
             )
 
-            # Save only once
             if not st.session_state.get(
                 "quiz_saved",
                 False
@@ -1198,17 +1768,21 @@ with tab2:
 
             st.markdown("---")
 
-            st.markdown("## 📊 Quiz Result")
+            st.markdown(
+                "## 📊 Quiz Result"
+            )
 
             r1, r2, r3 = st.columns(3)
 
             with r1:
+
                 st.metric(
                     "Score",
                     f"{score}/{total}"
                 )
 
             with r2:
+
                 st.metric(
                     "Percentage",
                     f"{percentage:.0f}%"
@@ -1218,8 +1792,10 @@ with tab2:
 
                 if percentage >= 80:
                     status = "Excellent 🎉"
+
                 elif percentage >= 60:
                     status = "Good 👍"
+
                 else:
                     status = "Needs Practice 📚"
 
@@ -1252,9 +1828,6 @@ with tab2:
                 "\n\n".join(feedback)
             )
 
-            # -------------------------------------
-            # PERSONALIZED RECOMMENDATIONS
-            # -------------------------------------
 
             st.markdown("---")
 
@@ -1268,14 +1841,11 @@ with tab2:
 
             for recommendation in recommendations:
 
-                st.markdown(
-                    f"""
-                    <div class="recommendation">
-                    {recommendation}
-                    </div>
-                    """,
-                    unsafe_allow_html=True
-                )
+                with st.container(border=True):
+
+                    st.markdown(
+                        recommendation
+                    )
 
 
 # =========================================================
@@ -1367,14 +1937,6 @@ with tab3:
                 planner_language
             )
 
-        save_study_plan(
-            st.session_state.student_name,
-            planner_goal,
-            planner_subjects,
-            planner_topics,
-            plan
-        )
-
         st.markdown("---")
 
         st.markdown(
@@ -1382,6 +1944,21 @@ with tab3:
         )
 
         st.markdown(plan)
+
+        if not plan.startswith("❌"):
+
+            save_study_plan(
+                st.session_state.student_name,
+                planner_goal,
+                planner_subjects,
+                planner_topics,
+                plan
+            )
+
+            st.success(
+                "💾 This study plan has been saved "
+                "to your learning memory."
+            )
 
 
 # =========================================================
@@ -1494,14 +2071,11 @@ with tab4:
 
         for recommendation in recommendations:
 
-            st.markdown(
-                f"""
-                <div class="recommendation">
-                {recommendation}
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
+            with st.container(border=True):
+
+                st.markdown(
+                    recommendation
+                )
 
 
 # =========================================================
