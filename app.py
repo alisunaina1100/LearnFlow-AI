@@ -1,4 +1,3 @@
-````python
 import os
 import json
 import streamlit as st
@@ -688,4 +687,3 @@ with tab3:
         st.markdown("---")
         st.markdown("## 📅 Your Study Plan")
         st.markdown(plan)
-````
