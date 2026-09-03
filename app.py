@@ -210,7 +210,11 @@ def utc_now():
 # 7. DATABASE
 # =========================================================
 
-DB_PATH = "learnflow_memory.db"
+# Keep the SQLite database beside app.py so all reruns use the same file.
+# Streamlit Cloud storage is still ephemeral across full app/container rebuilds;
+# for permanent production persistence, use a hosted database.
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(BASE_DIR, "learnflow_memory.db")
 
 
 def get_connection():
@@ -268,10 +272,48 @@ def ensure_column(conn, table, column, definition):
         )
 
 
+def ensure_users_column(conn, column, definition):
+    """Safely add authentication columns to older LearnFlow databases."""
+    allowed_columns = {
+        "password_hash",
+        "password_salt",
+        "password_iterations",
+        "created_at",
+        "legacy_password"
+    }
+
+    if column not in allowed_columns:
+        return
+
+    existing = conn.execute(
+        "PRAGMA table_info(users)"
+    ).fetchall()
+
+    names = {row["name"] for row in existing}
+
+    if column not in names:
+        conn.execute(
+            f"ALTER TABLE users ADD COLUMN {column} {definition}"
+        )
+
+
+def get_table_columns(conn, table):
+    return {
+        row["name"]
+        for row in conn.execute(
+            f"PRAGMA table_info({table})"
+        ).fetchall()
+    }
+
+
 def init_database():
     conn = get_connection()
 
     try:
+        # -----------------------------------------------------
+        # USERS
+        # -----------------------------------------------------
+        # Create the current schema for a fresh installation.
         conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -284,6 +326,56 @@ def init_database():
             )
         """)
 
+        # If an older LearnFlow database already exists, CREATE TABLE
+        # does not modify it. Add the current authentication columns
+        # instead of breaking existing accounts.
+        ensure_users_column(
+            conn,
+            "password_hash",
+            "TEXT"
+        )
+
+        ensure_users_column(
+            conn,
+            "password_salt",
+            "TEXT"
+        )
+
+        ensure_users_column(
+            conn,
+            "password_iterations",
+            "INTEGER"
+        )
+
+        ensure_users_column(
+            conn,
+            "created_at",
+            "TEXT"
+        )
+
+        ensure_users_column(
+            conn,
+            "legacy_password",
+            "TEXT"
+        )
+
+        # If a previous version used a column called "password",
+        # preserve it by copying it into legacy_password. We never
+        # display or return this value to the UI.
+        user_columns = get_table_columns(conn, "users")
+
+        if "password" in user_columns and "legacy_password" in user_columns:
+            conn.execute("""
+                UPDATE users
+                SET legacy_password = password
+                WHERE
+                    (legacy_password IS NULL OR legacy_password = '')
+                    AND password IS NOT NULL
+            """)
+
+        # -----------------------------------------------------
+        # OTHER TABLES
+        # -----------------------------------------------------
         conn.execute("""
             CREATE TABLE IF NOT EXISTS chat_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -377,6 +469,11 @@ def init_database():
 
         conn.commit()
 
+    except Exception:
+        conn.rollback()
+        logger.exception("Database initialization/migration failed")
+        raise
+
     finally:
         conn.close()
 
@@ -434,6 +531,7 @@ def verify_password(password, stored_hash, stored_salt, iterations):
 def create_user(name, email, password):
     name = clean_text(name, MAX_NAME_LENGTH)
     email = clean_text(email, MAX_EMAIL_LENGTH).lower()
+    password = str(password or "")
 
     if not name:
         return False, "Please enter your name."
@@ -455,34 +553,61 @@ def create_user(name, email, password):
     conn = get_connection()
 
     try:
-        conn.execute("""
-            INSERT INTO users
-            (
-                name,
-                email,
-                password_hash,
-                password_salt,
-                password_iterations,
-                created_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (
+        # Build the INSERT from the actual database columns. This makes
+        # signup compatible with both a fresh database and an older
+        # LearnFlow database that may still contain a legacy password
+        # column with a NOT NULL constraint.
+        columns = get_table_columns(conn, "users")
+
+        insert_columns = [
+            "name",
+            "email",
+            "password_hash",
+            "password_salt",
+            "password_iterations",
+            "created_at"
+        ]
+
+        values = [
             name,
             email,
             password_hash,
             salt,
             iterations,
             utc_now()
-        ))
+        ]
+
+        # Some early versions used a NOT NULL "password" column.
+        # Store the new hash there as a compatibility value; the current
+        # authentication path uses password_hash + salt.
+        if "password" in columns:
+            insert_columns.append("password")
+            values.append(password_hash)
+
+        if "legacy_password" in columns:
+            insert_columns.append("legacy_password")
+            values.append(None)
+
+        placeholders = ", ".join(["?"] * len(values))
+        column_sql = ", ".join(insert_columns)
+
+        conn.execute(
+            f"""
+            INSERT INTO users ({column_sql})
+            VALUES ({placeholders})
+            """,
+            values
+        )
 
         conn.commit()
 
         return True, "Account created successfully."
 
-    except sqlite3.IntegrityError:
+    except sqlite3.IntegrityError as e:
+        logger.warning("Signup integrity error: %s", e)
         return False, "An account with this email already exists."
 
-    except Exception as e:
+    except Exception:
         logger.exception("Signup failed")
         return False, "Unable to create account right now."
 
@@ -492,6 +617,10 @@ def create_user(name, email, password):
 
 def authenticate_user(email, password):
     email = clean_text(email, MAX_EMAIL_LENGTH).lower()
+    password = str(password or "")
+
+    if not email or not password:
+        return None
 
     conn = get_connection()
 
@@ -499,24 +628,93 @@ def authenticate_user(email, password):
         row = conn.execute("""
             SELECT *
             FROM users
-            WHERE email = ?
+            WHERE LOWER(TRIM(email)) = ?
         """, (email,)).fetchone()
 
         if not row:
             return None
 
-        if not verify_password(
-            password,
-            row["password_hash"],
-            row["password_salt"],
+        # -----------------------------------------------------
+        # Current secure password format
+        # -----------------------------------------------------
+        stored_hash = row["password_hash"] if "password_hash" in row.keys() else None
+        stored_salt = row["password_salt"] if "password_salt" in row.keys() else None
+        stored_iterations = (
             row["password_iterations"]
-        ):
+            if "password_iterations" in row.keys()
+            else None
+        )
+
+        authenticated = False
+
+        if stored_hash and stored_salt and stored_iterations:
+            authenticated = verify_password(
+                password,
+                stored_hash,
+                stored_salt,
+                stored_iterations
+            )
+
+        # -----------------------------------------------------
+        # Legacy compatibility
+        # -----------------------------------------------------
+        # Older versions may have stored a plain "password" value.
+        # If that old value is correct, immediately upgrade the account
+        # to the current PBKDF2 format.
+        if not authenticated:
+            legacy_value = None
+
+            if "legacy_password" in row.keys():
+                legacy_value = row["legacy_password"]
+
+            if not legacy_value and "password" in row.keys():
+                legacy_value = row["password"]
+
+            if legacy_value:
+                legacy_value = str(legacy_value)
+
+                # Support a legacy plaintext password only as a migration
+                # path. Never return it to the application/UI.
+                if secrets.compare_digest(password, legacy_value):
+                    new_hash, new_salt, new_iterations = hash_password(password)
+
+                    update_parts = [
+                        "password_hash = ?",
+                        "password_salt = ?",
+                        "password_iterations = ?"
+                    ]
+                    update_values = [
+                        new_hash,
+                        new_salt,
+                        new_iterations
+                    ]
+
+                    if "legacy_password" in row.keys():
+                        update_parts.append("legacy_password = NULL")
+
+                    # If an old password column exists, replace the legacy
+                    # plaintext value with the new PBKDF2 hash as well.
+                    if "password" in row.keys():
+                        update_parts.append("password = ?")
+                        update_values.append(new_hash)
+
+                    conn.execute(
+                        "UPDATE users SET "
+                        + ", ".join(update_parts)
+                        + " WHERE id = ?",
+                        update_values + [row["id"]]
+                    )
+                    conn.commit()
+
+                    authenticated = True
+
+        if not authenticated:
             return None
 
         return {
             "id": row["id"],
             "name": row["name"],
-            "email": row["email"]
+            "email": email
         }
 
     except Exception:
@@ -574,6 +772,24 @@ def reset_login_attempts():
     st.session_state.login_blocked_until = 0.0
 
 
+def establish_session(user):
+    """Set authenticated user state without touching quiz/tutor logic."""
+    st.session_state.authenticated = True
+    st.session_state.user_id = user["id"]
+    st.session_state.student_name = user["name"]
+    st.session_state.student_email = user["email"]
+
+    # Start a clean learning session after login/signup.
+    st.session_state.quiz_data = None
+    st.session_state.quiz_submitted = False
+    st.session_state.quiz_answers = []
+    st.session_state.quiz_saved = False
+    st.session_state.quiz_generation_id = 0
+    st.session_state.tutor_messages = []
+
+    reset_login_attempts()
+
+
 # =========================================================
 # 12. LOGIN / SIGNUP
 # =========================================================
@@ -615,7 +831,7 @@ if not st.session_state.authenticated:
             if remaining > 0:
                 st.warning(
                     f"Too many attempts. "
-                    f"Please wait {int(remaining)} seconds."
+                    f"Please wait {max(1, int(remaining + 0.999))} seconds."
                 )
             else:
                 reset_login_attempts()
@@ -634,7 +850,7 @@ if not st.session_state.authenticated:
 
                 if remaining > 0:
                     st.error(
-                        f"Please wait {int(remaining)} seconds."
+                        f"Please wait {max(1, int(remaining + 0.999))} seconds."
                     )
                     st.stop()
 
@@ -647,19 +863,7 @@ if not st.session_state.authenticated:
 
                 if user:
 
-                    st.session_state.authenticated = True
-                    st.session_state.user_id = user["id"]
-                    st.session_state.student_name = user["name"]
-                    st.session_state.student_email = user["email"]
-
-                    st.session_state.quiz_data = None
-                    st.session_state.quiz_submitted = False
-                    st.session_state.quiz_answers = []
-                    st.session_state.quiz_saved = False
-                    st.session_state.quiz_generation_id = 0
-                    st.session_state.tutor_messages = []
-
-                    reset_login_attempts()
+                    establish_session(user)
 
                     st.success("Login successful!")
                     st.rerun()
@@ -733,20 +937,16 @@ if not st.session_state.authenticated:
 
                     if user:
 
-                        st.session_state.authenticated = True
-                        st.session_state.user_id = user["id"]
-                        st.session_state.student_name = user["name"]
-                        st.session_state.student_email = user["email"]
-
-                        st.session_state.quiz_data = None
-                        st.session_state.quiz_submitted = False
-                        st.session_state.quiz_answers = []
-                        st.session_state.quiz_saved = False
-                        st.session_state.quiz_generation_id = 0
-                        st.session_state.tutor_messages = []
+                        establish_session(user)
 
                         st.success(message)
                         st.rerun()
+
+                    else:
+                        st.error(
+                            "Account was created, but automatic sign-in failed. "
+                            "Please use the Login tab with the same email and password."
+                        )
 
                 else:
                     st.error(message)
@@ -1991,6 +2191,18 @@ with st.sidebar:
 
         for key, value in defaults.items():
             st.session_state[key] = value
+
+        # Clear login/signup form values so the next user/session does not
+        # inherit credentials typed into the previous authentication form.
+        for key in (
+            "login_email",
+            "login_password",
+            "signup_name",
+            "signup_email",
+            "signup_password",
+            "signup_confirm_password"
+        ):
+            st.session_state.pop(key, None)
 
         st.rerun()
 
